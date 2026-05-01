@@ -1,21 +1,39 @@
-
 # Datathon 2026 Round 1 — Revenue and COGS Forecasting
 
 ## 1. Project Overview
 
-This project solves the revenue forecasting task in Datathon 2026 Round 1. The goal is to predict daily `Revenue` and `COGS` for the period from `2023-01-01` to `2024-07-01`.
+This repository contains my solution for the revenue forecasting task in **Datathon 2026 Round 1**. The objective is to predict daily `Revenue` and `COGS` for the period from `2023-01-01` to `2024-07-01`.
 
-The final solution is an ensemble forecasting pipeline that combines three main components:
+The final solution is a leakage-aware time-series ensemble pipeline. It combines:
 
 1. A **Recent-Period Seasonal Ensemble**
 2. A **Direct XGBoost Time-Series Model**
 3. A **Final Calibration and Blending Layer**
 
-The main idea behind the solution is that the latest years in the training data are more representative of the hidden test period than older historical data. Therefore, the model gives stronger importance to recent sales patterns while still using older years to learn long-term seasonality.
+The main idea is that the latest years in the training data are more representative of the hidden test period than older historical years. Therefore, the model gives stronger importance to recent sales patterns while still using older data to learn long-term seasonality.
 
 ---
 
-## 2. Data Sources
+## 2. Repository Structure
+
+The main notebook contains the full end-to-end workflow:
+
+* data loading
+* data cleaning
+* exploratory data analysis
+* feature engineering
+* time-based validation
+* seasonal ensemble modeling
+* XGBoost modeling
+* final blending and calibration
+* submission file generation
+* feature importance / explainability analysis
+
+All source code needed to reproduce the final submission is included in the notebook.
+
+---
+
+## 3. Data Sources
 
 The main target file is `sales.csv`, which contains daily historical values of `Date`, `Revenue`, and `COGS`.
 
@@ -23,30 +41,50 @@ The future prediction dates are taken from `sample_submission.csv`.
 
 The dataset also includes auxiliary business tables such as `orders.csv`, `order_items.csv`, `products.csv`, `payments.csv`, `shipments.csv`, `returns.csv`, `web_traffic.csv`, and `inventory.csv`.
 
-These auxiliary tables were inspected for feature analysis. However, because future values of orders, payments, web traffic, and inventory are not available for 2023–2024, the final best model mainly relies on date-based and time-series forecasting features to avoid leakage.
+These auxiliary tables were inspected during EDA and feature analysis. However, because future values of orders, payments, web traffic, and inventory are not available for the test period, the final best model mainly relies on date-based and time-series forecasting features. This prevents leakage from future business signals that would not be known at prediction time.
 
 ---
 
-## 3. Data Cleaning Pipeline
+## 4. Pipeline Summary
 
-The raw sales data is cleaned through the following steps:
+The final pipeline follows this structure:
+
+1. Load and validate all input files.
+2. Clean the daily sales target.
+3. Build calendar, seasonality, lag, rolling, and recent-regime features.
+4. Train a seasonal ensemble using multiple recent-period assumptions.
+5. Train direct XGBoost models for `Revenue` and `COGS`.
+6. Validate all models using chronological validation.
+7. Blend the best seasonal model and XGBoost model.
+8. Apply a final calibration factor.
+9. Export the submission file.
+
+This pipeline is designed to be reproducible, interpretable, and safe from future-data leakage.
+
+---
+
+## 5. Data Cleaning
+
+The raw daily sales data is cleaned using the following steps:
 
 1. Convert `Date` into datetime format.
-2. Sort observations chronologically.
+2. Sort records chronologically.
 3. Aggregate duplicated dates if any exist.
 4. Reindex the dataset into a complete daily date range.
-5. Fill missing values using interpolation and median fallback.
-6. Apply conservative outlier clipping using rolling median and rolling MAD.
+5. Fill missing target values using interpolation and median fallback.
+6. Apply conservative outlier clipping using a rolling median and rolling median absolute deviation.
 
-The outlier clipping is designed to reduce abnormal noise while preserving valid seasonal spikes. This keeps the time series stable while avoiding aggressive smoothing.
+The outlier clipping is intentionally conservative. It reduces extreme abnormal noise but keeps valid seasonal spikes because sudden sales peaks may represent real business events.
+
+This cleaning step improves the stability of the downstream models while preserving important time-series patterns.
 
 ---
 
-## 4. Feature Engineering
+## 6. Feature Engineering
 
-## 4.1 Calendar Features
+## 6.1 Calendar Features
 
-The model extracts several calendar features from the `Date` column:
+The model extracts standard calendar features from the `Date` column:
 
 * `year`
 * `month`
@@ -61,32 +99,19 @@ The model extracts several calendar features from the `Date` column:
 * `is_quarter_start`
 * `is_quarter_end`
 
-These features help the model learn regular business cycles such as weekday/weekend effects, monthly effects, and yearly seasonality.
+These features help capture regular business cycles such as weekly, monthly, quarterly, and yearly effects.
 
-## 4.2 Fourier Seasonality Features
+## 6.2 Fourier Seasonality Features
 
-To capture smooth yearly and weekly cycles, Fourier features are added. These features represent repeating seasonal patterns using sine and cosine transformations.
+To model smooth periodic behavior, the pipeline creates Fourier features from `day_of_year` and `day_of_week`.
 
-For yearly seasonality, the model uses Fourier transformations based on `day_of_year`.
+These features help the model capture annual and weekly seasonality more smoothly than raw categorical date variables.
 
-For weekly seasonality, the model uses Fourier transformations based on `day_of_week`.
+They are useful because revenue often follows repeating patterns across the year, such as higher or lower demand during specific periods.
 
-These features allow the model to capture periodic trends more smoothly than raw calendar variables alone.
+## 6.3 Lag Features
 
-## 4.3 Recent-Regime Features
-
-A key observation is that the most recent years show a different sales level and trend compared with earlier years. Therefore, the model includes recent-period indicators such as:
-
-* `is_recent_2020`
-* `is_recent_2021`
-* `is_latest_period`
-* `latest_period_t`
-
-These features help the model distinguish older historical patterns from the more relevant latest business regime.
-
-## 4.4 Lag and Rolling Features
-
-For the XGBoost model, lag features are created:
+The XGBoost model uses multiple lag features:
 
 * `lag_1`
 * `lag_7`
@@ -97,7 +122,11 @@ For the XGBoost model, lag features are created:
 * `lag_182`
 * `lag_365`
 
-Rolling statistics are also created over multiple windows:
+These features allow the model to learn short-term memory, weekly recurrence, quarterly effects, half-year effects, and same-period-last-year behavior.
+
+## 6.4 Rolling Statistical Features
+
+The model also uses rolling statistics over several windows:
 
 * 7 days
 * 14 days
@@ -114,22 +143,28 @@ For each window, the pipeline computes:
 * rolling minimum
 * rolling maximum
 
-These features help the model learn short-term momentum, medium-term trend, yearly recurrence, local volatility, and deviations from recent sales levels.
+These features help the model understand recent trend, volatility, and deviation from historical baselines.
+
+## 6.5 Recent-Regime Features
+
+The model includes indicators for the latest observed business regime. These features allow the model to treat recent years differently from earlier years.
+
+This is important because the most recent data has a different level and trend compared with older history. Older years remain useful for learning seasonality, but recent years are more useful for predicting the future level of sales.
 
 ---
 
-## 5. Modeling Approach
+## 7. Modeling Approach
 
-The final solution uses an ensemble instead of relying on a single model.
+## 7.1 Recent-Period Seasonal Ensemble
 
-## 5.1 Recent-Period Seasonal Ensemble
+The first major component is a recent-period seasonal ensemble.
 
-The first model is a seasonal ensemble based on multiple forecasting assumptions:
+This model generates forecasts using multiple assumptions:
 
 * same-day-last-year behavior
 * day-of-year seasonal profile
-* month-day profile
-* month-weekday profile
+* month-day seasonal profile
+* month-weekday seasonal profile
 * recent-period growth trend
 * recent-year weighted seasonality
 
@@ -141,96 +176,98 @@ Several growth assumptions are tested, including:
 * recent-period growth
 * latest-year recovery growth
 
-Each configuration is evaluated using time-based validation. The best configurations are combined using inverse validation error weighting, so stronger validation models contribute more while still preserving ensemble diversity.
+Each configuration is evaluated using chronological validation. The best configurations are then combined using inverse validation error weighting. This means models with lower validation error receive larger weights in the ensemble.
 
-## 5.2 Direct XGBoost Time-Series Model
+This approach provides strong seasonality modeling while reducing the risk of relying on only one assumption.
 
-The second model is a direct XGBoost regressor trained separately for `Revenue` and `COGS`.
+## 7.2 Direct XGBoost Time-Series Model
 
-The target is log-transformed using `log1p(target)` during training and converted back after prediction using `expm1(prediction_log)`. This reduces the effect of large spikes and stabilizes model training.
+The second major component is a direct XGBoost model trained separately for `Revenue` and `COGS`.
 
-The XGBoost model uses:
+XGBoost uses the engineered features described above:
 
 * calendar features
-* Fourier seasonality features
-* recent-regime features
+* Fourier features
 * lag features
-* rolling statistics
+* rolling features
+* recent-regime features
 
-Recent years are given larger sample weights so that the model focuses more on the latest training period, which is more relevant for forecasting 2023–2024.
+The target is log-transformed during training using `log1p(target)` and converted back using `expm1(prediction)`. This stabilizes the target distribution and reduces the impact of extreme values.
 
-## 5.3 Final Blending and Calibration
+The model also uses recency weighting. More recent years receive larger sample weights, which helps the model adapt to the latest sales regime.
 
-The final prediction blends the seasonal ensemble with the XGBoost model.
+## 7.3 Final Blending and Calibration
+
+The final prediction blends the seasonal model and the XGBoost model.
 
 The final structure is:
 
 Final prediction = `0.825 × Seasonal_Model_Scaled + 0.175 × XGBoost_Model`
 
-The best-performing blend used:
+The best final settings were:
 
 * `scale = 1.18`
 * `xgb_weight = 0.15`
 
-The scale factor corrects the overall prediction level because earlier models consistently underpredicted the target level.
+The scale factor corrects the overall prediction level because earlier models consistently underpredicted the target level. The XGBoost component provides additional local corrections based on lag and rolling patterns.
 
 ---
 
-## 6. Cross-Validation Strategy
+## 8. Cross-Validation Strategy
 
-The pipeline uses chronological validation instead of random splitting.
+The solution uses **time-based cross-validation**, not random shuffling.
 
 The main validation setup is:
 
-* Training data: all dates before `2022-01-01`
-* Validation data: `2022-01-01` to `2022-12-31`
+* Training period: all dates before `2022-01-01`
+* Validation period: from `2022-01-01` to `2022-12-31`
 
-This simulates the real forecasting scenario, where future dates must be predicted using only past information.
+This validation strategy simulates the real forecasting task: the model must predict future dates using only past data.
 
-The seasonal ensemble also uses recent-year validation to prioritize configurations that perform well in the latest observed regime.
+The seasonal ensemble also evaluates configurations on recent chronological folds. Configurations that perform better on recent validation periods receive more importance.
 
-This validation design avoids unrealistic leakage from future data into training.
-
----
-
-## 7. Leakage Prevention
-
-Several steps are used to prevent data leakage.
-
-## 7.1 Test Data Usage
-
-`sample_submission.csv` is used only to obtain future dates. No target values from the test period are used.
-
-## 7.2 Chronological Training
-
-Training data always comes before validation data. The model never trains on future observations.
-
-## 7.3 Recursive Forecasting
-
-For the XGBoost model, future predictions are generated recursively. When predicting a future date, the model only uses:
-
-* historical values
-* previous model predictions
-* date-derived features
-
-It does not use future true target values.
-
-## 7.4 Auxiliary Tables
-
-Auxiliary business tables were analyzed, but future auxiliary values are unavailable. Therefore, they are not directly used as future-known features in the final best model. This prevents leakage from unavailable future business signals.
+This design is more appropriate for time-series forecasting than random train-test splitting, because random splitting would leak future information into the training process.
 
 ---
 
-## 8. Explainability
+## 9. Leakage Control
 
-The solution supports explainability through:
+Leakage prevention is a central part of the pipeline.
+
+## 9.1 Test File Usage
+
+`sample_submission.csv` is used only to obtain the future dates for prediction. No target values from the test period are used.
+
+## 9.2 Chronological Training
+
+All validation is chronological. The training set always comes before the validation set in time.
+
+## 9.3 Lag and Rolling Features
+
+Lag and rolling features are created only from past observations. Rolling windows are shifted before being used so that the current target value is not included in its own feature.
+
+## 9.4 Recursive Forecasting
+
+For future prediction, XGBoost uses recursive forecasting. This means that when predicting 2023–2024, the model uses historical values and its own previous predictions for future lags. It never uses true future target values.
+
+## 9.5 Auxiliary Tables
+
+Auxiliary business tables are not used as future-known predictors because their future values are unavailable. They are used only for EDA and historical analysis. This avoids leakage from information that would not exist at real prediction time.
+
+---
+
+## 10. Explainability
+
+The solution includes model explainability through:
 
 1. XGBoost feature importance
 2. SHAP values
 
-## 8.1 Feature Importance
+## 10.1 XGBoost Feature Importance
 
-XGBoost feature importance can be extracted from the trained model. The most important feature groups are expected to include:
+Feature importance is used to identify which features contribute most to model prediction.
+
+The most important feature groups are expected to include:
 
 * `lag_365`
 * `lag_182`
@@ -238,112 +275,116 @@ XGBoost feature importance can be extracted from the trained model. The most imp
 * `roll_mean_91`
 * `day_of_year`
 * yearly Fourier features
-* recent-period indicators
+* recent-regime indicators
 * month and weekday features
 
-These features show that the model learns from yearly seasonality, same-period historical behavior, recent trend, recent structural level changes, and weekly business cycles.
+These features show that the model relies on yearly seasonality, same-period-last-year patterns, recent trend, and recent level changes.
 
-## 8.2 SHAP Values
+## 10.2 SHAP Explanation
 
-SHAP can be used to explain how each feature affects model predictions.
+SHAP values can be used to explain how each feature pushes the prediction higher or lower.
 
-A SHAP summary plot helps identify which features push predicted revenue upward or downward. In this project, SHAP or feature importance analysis is used to explain the most important drivers behind revenue and COGS forecasts.
+A SHAP summary plot provides a global explanation of model behavior. It shows which features have the largest impact and whether high or low feature values tend to increase or decrease the prediction.
 
----
-
-## 9. Business Interpretation
-
-The model identifies several important drivers of revenue.
-
-## 9.1 Annual Seasonality
-
-Features such as `day_of_year`, yearly Fourier terms, and `lag_365` are highly relevant. This indicates that revenue follows a strong annual cycle, where certain periods of the year consistently have higher or lower sales.
-
-## 9.2 Recent Business Level Shift
-
-The model performs better when recent years are weighted more heavily. This suggests that the latest business regime differs from earlier historical periods. Older years are still useful for learning seasonality, but they are less reliable for predicting the future level of revenue.
-
-## 9.3 Same-Day-Last-Year Behavior
-
-The seasonal ensemble relies heavily on same-day-last-year patterns. This means the model assumes that future revenue is strongly related to the same calendar period in recent years, adjusted by growth and calibration.
-
-## 9.4 Short-Term Momentum
-
-Rolling means and recent lags help the model determine whether revenue is currently above or below its recent baseline. This allows the model to adjust predictions based on local trend changes.
-
-## 9.5 Relationship Between Revenue and COGS
-
-`COGS` is strongly related to `Revenue`, so the final calibration scales both targets together. This reflects the business assumption that higher sales usually lead to proportionally higher cost of goods sold.
+This improves transparency and helps translate the model behavior into business insights.
 
 ---
 
-## 10. Reproducibility
+## 11. Business Interpretation of Model Drivers
 
-The notebook sets a fixed seed for reproducibility:
+The model identifies the following main revenue drivers.
+
+## 11.1 Annual Seasonality
+
+Features such as `day_of_year`, yearly Fourier terms, and `lag_365` are important. This means revenue follows a strong annual cycle. Some periods of the year consistently generate higher or lower revenue.
+
+## 11.2 Recent Sales Level
+
+The model performs better when recent years are weighted more heavily. This suggests that the latest business level is more relevant to the hidden test period than older historical levels.
+
+## 11.3 Same-Period Historical Behavior
+
+The same-day-last-year and yearly lag features are important. This indicates that revenue on a future date is strongly related to revenue around the same calendar date in previous years.
+
+## 11.4 Short-Term Momentum
+
+Rolling means and recent lags help the model understand whether sales are currently above or below the recent baseline. This allows the model to adjust predictions based on local upward or downward trends.
+
+## 11.5 Relationship Between Revenue and COGS
+
+`COGS` is closely related to `Revenue`. The final calibration scales both targets together, reflecting the business assumption that higher sales generally lead to proportionally higher cost of goods sold.
+
+---
+
+## 12. Reproducibility
+
+The notebook is designed to be reproducible.
+
+A fixed random seed is used:
 
 * `SEED = 2026`
 * `random.seed(SEED)`
 * `np.random.seed(SEED)`
 * `random_state = SEED` for XGBoost
 
-All source code is included in the notebook, including:
+The repository includes the full notebook with all steps:
 
 * data loading
 * data cleaning
 * feature engineering
 * validation
 * model training
-* prediction
-* blending
+* model explainability
+* final prediction
 * submission export
 
-This allows the full pipeline to be rerun end-to-end.
+Therefore, the full pipeline can be rerun from start to finish.
 
 ---
 
-## 11. Final Result Summary
+## 13. Final Result Summary
 
-The final solution improved through several stages:
+The solution improved through several stages:
 
-1. Baseline seasonal model
+1. Basic seasonal baseline
 2. Recent-period seasonal ensemble
 3. Uniform scale calibration
-4. Direct XGBoost blend
-5. Fine-tuned scale and XGBoost weight
+4. Direct XGBoost blending
+5. Fine-tuning of scale and XGBoost weight
 
 The strongest final setup was:
 
 * `scale = 1.18`
 * `xgb_weight = 0.175`
 
-This combination produced the best leaderboard result among the tested approaches.
+This setup achieved the best leaderboard result among the tested approaches.
 
 ---
 
-## 12. Limitations
+## 14. Limitations
 
-The main limitation is that future values of auxiliary business signals such as orders, payments, web traffic, and inventory are unavailable. These features are highly informative historically, but they cannot be directly used for future prediction without forecasting them first.
+The main limitation is that future values of auxiliary business signals such as future orders, payments, web traffic, and inventory are unavailable. These variables are useful historically, but they cannot be directly used for future prediction unless they are forecasted first.
 
-In addition, leaderboard-based calibration can improve public score but may overfit if used too aggressively. Therefore, final adjustments were kept small and based on consistent model behavior.
+Another limitation is that final calibration may slightly depend on leaderboard feedback. Therefore, calibration was kept simple and small to reduce overfitting risk.
 
 ---
 
-## 13. Future Improvements
+## 15. Future Improvements
 
-Potential future improvements include:
+Potential improvements include:
 
 1. Forecasting business components such as order volume, average order value, and COGS ratio.
-2. Training additional ensemble models such as LightGBM and CatBoost.
+2. Adding LightGBM or CatBoost as extra ensemble members.
 3. Using SHAP-based feature selection to remove noisy features.
-4. Building separate models for 2023 and 2024.
+4. Training separate models for 2023 and 2024.
 5. Modeling `COGS` as a function of predicted `Revenue`.
-6. Using a stronger multi-fold time-series validation framework.
-7. Creating a stacked ensemble using seasonal, XGBoost, LightGBM, and business-component models.
+6. Using more robust multi-fold time-series validation.
+7. Building a stacked ensemble from seasonal models, XGBoost, and business-component models.
 
 ---
 
-## 14. Conclusion
+## 16. Conclusion
 
-This solution combines domain-driven time-series modeling with machine learning correction. The most important insight is that the latest years in the training data are more representative of the hidden test period than older historical years, so recent patterns should receive higher importance.
+This solution combines domain-driven time-series modeling with machine learning correction. The strongest insight is that recent years are more useful for predicting the future level of revenue, while older years still help the model learn seasonality.
 
-The final model is leakage-aware, reproducible, and explainable. It captures annual seasonality, recent level changes, recent trend behavior, and the relationship between `Revenue` and `COGS`.
+The final model is reproducible, leakage-aware, and explainable. It uses chronological validation, lag-safe feature engineering, feature importance, and SHAP-based interpretation to provide both accurate predictions and meaningful business insights.
