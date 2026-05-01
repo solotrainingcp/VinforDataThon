@@ -355,7 +355,7 @@ The solution improved through several stages:
 The strongest final setup was:
 
 * `scale = 1.18`
-* `xgb_weight = 0.175`
+* `xgb_weight = 0.15`
 
 This setup achieved the best leaderboard result among the tested approaches.
 
