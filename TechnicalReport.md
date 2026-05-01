@@ -202,7 +202,7 @@ The final prediction blends the seasonal model and the XGBoost model.
 
 The final structure is:
 
-Final prediction = `0.825 × Seasonal_Model_Scaled + 0.175 × XGBoost_Model`
+Final prediction = `0.825 × Seasonal_Model_Scaled + 0.15 × XGBoost_Model`
 
 The best final settings were:
 
